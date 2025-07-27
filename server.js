@@ -1,41 +1,71 @@
 // server.js
-// Basit, tek odalı WebRTC Signaling Sunucusu
-// ------------------------------------------
 const express = require("express");
-const http    = require("http");
-const { Server } = require("socket.io");
-const cors = require("cors");
+const http = require("http");
+const WebSocket = require("ws");
+const path = require("path");
 
-const app    = express();
+const app = express();
 const server = http.createServer(app);
-const io     = new Server(server, { cors: { origin: "*" } });
+const wss = new WebSocket.Server({ server });
 
-/* ---- HTTP endpoint (sağlık testi) ---- */
-app.use(cors());
-app.get("/", (_, res) => res.send("🟢 WebRTC single-room signaling server aktif"));
+let clients = new Map(); // ws => { id, mic, muted }
 
-/* ---- Tek odalı Socket.IO bölümü ---- */
-const ROOM = "global-room";
+let clientId = 1;
 
-io.on("connection", socket => {
-  console.log("➕ Yeni istemci:", socket.id);
-  socket.join(ROOM);               // herkes aynı odaya giriyor
+app.use(express.static("public")); // UI varsa buraya koyarsın
 
-  /* Diğer peer’lere “yeni katılımcı” bildir: */
-  socket.to(ROOM).emit("new-peer", socket.id);
+// Panel - http://localhost:3000/
+app.get("/", (req, res) => {
+  let html = `<h2>🎙️ Sesli Sohbet Durumu</h2><ul>`;
+  for (const [ws, info] of clients.entries()) {
+    html += `<li><b>#${info.id}</b> — ${info.mic ? "🎤 Mic Açık" : "🔇 Mic Kapalı"} ${info.muted ? "🚫 Mute Edildi" : ""}</li>`;
+  }
+  html += `</ul><p>Toplam Bağlı: ${clients.size}</p>`;
+  res.send(html);
+});
 
-  /* Offer / Answer / ICE candidate yönlendirmesi */
-  socket.on("signal", data => {
-    // data = { target: <socketId>, type: "offer|answer|candidate", sdp|candidate }
-    io.to(data.target).emit("signal", { from: socket.id, ...data });
+wss.on("connection", function connection(ws) {
+  const id = clientId++;
+  clients.set(ws, { id, mic: false, muted: false });
+
+  ws.on("message", function incoming(message) {
+    try {
+      const msg = JSON.parse(message);
+
+      if (msg.type === "signal") {
+        // WebRTC sinyali diğer herkese gönder
+        wss.clients.forEach(function each(client) {
+          if (client !== ws && client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({ type: "signal", data: msg.data }));
+          }
+        });
+      } else if (msg.type === "mic") {
+        const info = clients.get(ws);
+        if (info) info.mic = msg.status;
+      } else if (msg.type === "speech") {
+        // Ses analizi — küfür kontrolü
+        const badWords = ["sikim", "soxum", "siktir", "qəhbə", "sik", "anan", "bacın", "peyser", "daşşağ"];
+        const saidBad = badWords.some(word => msg.text.toLowerCase().includes(word));
+        const info = clients.get(ws);
+
+        if (saidBad && info && !info.muted) {
+          info.muted = true;
+          info.mic = false;
+          // Client'a mute sinyali gönder
+          ws.send(JSON.stringify({ type: "mute", reason: "Küfür tespit edildi." }));
+          console.log(`#${info.id} otomatik mute edildi (küfür)`);
+        }
+      }
+    } catch (e) {
+      console.error("Geçersiz mesaj:", e);
+    }
   });
 
-  socket.on("disconnect", () => {
-    console.log("➖ Ayrılan:", socket.id);
-    socket.to(ROOM).emit("peer-left", socket.id);
+  ws.on("close", () => {
+    clients.delete(ws);
   });
 });
 
-/* ---- Sunucuyu başlat ---- */
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Signaling server ${PORT} portunda çalışıyor`));
+server.listen(3000, () => {
+  console.log("✅ Sesli sohbet sunucusu http://localhost:3000 üzerinde çalışıyor.");
+});
