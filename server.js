@@ -1,71 +1,39 @@
-// server.js
 const express = require("express");
 const http = require("http");
-const WebSocket = require("ws");
-const path = require("path");
+const socketIo = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const io = socketIo(server);
 
-let clients = new Map(); // ws => { id, mic, muted }
-
-let clientId = 1;
-
-app.use(express.static("public")); // UI varsa buraya koyarsın
-
-// Panel - http://localhost:3000/
+// Sunucunun root dizinine gelen isteklere index.html dosyasını gönderiyoruz
 app.get("/", (req, res) => {
-  let html = `<h2>🎙️ Sesli Sohbet Durumu</h2><ul>`;
-  for (const [ws, info] of clients.entries()) {
-    html += `<li><b>#${info.id}</b> — ${info.mic ? "🎤 Mic Açık" : "🔇 Mic Kapalı"} ${info.muted ? "🚫 Mute Edildi" : ""}</li>`;
-  }
-  html += `</ul><p>Toplam Bağlı: ${clients.size}</p>`;
-  res.send(html);
+    res.sendFile(__dirname + "/index.html");
 });
 
-wss.on("connection", function connection(ws) {
-  const id = clientId++;
-  clients.set(ws, { id, mic: false, muted: false });
+// WebSocket bağlantısı kurma
+io.on("connection", (socket) => {
+    console.log("Bir kullanıcı bağlandı");
 
-  ws.on("message", function incoming(message) {
-    try {
-      const msg = JSON.parse(message);
+    // WebRTC ile sesli sohbet başlatmak için gerekli olaylar
+    socket.on("offer", (offer) => {
+        socket.broadcast.emit("offer", offer);  // Diğer kullanıcılara 'offer' mesajını gönder
+    });
 
-      if (msg.type === "signal") {
-        // WebRTC sinyali diğer herkese gönder
-        wss.clients.forEach(function each(client) {
-          if (client !== ws && client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({ type: "signal", data: msg.data }));
-          }
-        });
-      } else if (msg.type === "mic") {
-        const info = clients.get(ws);
-        if (info) info.mic = msg.status;
-      } else if (msg.type === "speech") {
-        // Ses analizi — küfür kontrolü
-        const badWords = ["sikim", "soxum", "siktir", "qəhbə", "sik", "anan", "bacın", "peyser", "daşşağ"];
-        const saidBad = badWords.some(word => msg.text.toLowerCase().includes(word));
-        const info = clients.get(ws);
+    socket.on("answer", (answer) => {
+        socket.broadcast.emit("answer", answer);  // Diğer kullanıcılara 'answer' mesajını gönder
+    });
 
-        if (saidBad && info && !info.muted) {
-          info.muted = true;
-          info.mic = false;
-          // Client'a mute sinyali gönder
-          ws.send(JSON.stringify({ type: "mute", reason: "Küfür tespit edildi." }));
-          console.log(`#${info.id} otomatik mute edildi (küfür)`);
-        }
-      }
-    } catch (e) {
-      console.error("Geçersiz mesaj:", e);
-    }
-  });
+    socket.on("ice-candidate", (candidate) => {
+        socket.broadcast.emit("ice-candidate", candidate);  // ICE adaylarını paylaşma
+    });
 
-  ws.on("close", () => {
-    clients.delete(ws);
-  });
+    socket.on("disconnect", () => {
+        console.log("Bir kullanıcı ayrıldı");
+    });
 });
 
+// Sunucuyu başlatma
 server.listen(3000, () => {
-  console.log("✅ Sesli sohbet sunucusu http://localhost:3000 üzerinde çalışıyor.");
+    console.log("Sunucu 3000 portunda çalışıyor");
 });
