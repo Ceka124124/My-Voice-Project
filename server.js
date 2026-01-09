@@ -5,32 +5,32 @@ const socketIo = require("socket.io");
 const app = express();
 const server = http.createServer(app);
 
-// En düşük gecikme için WebSocket öncelikli ayarlar
+// Gecikmeyi minimize etmek için WebSocket öncelikli ayarlar
 const io = socketIo(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  },
-  transports: ['websocket', 'polling'] 
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    },
+    transports: ['websocket', 'polling']
 });
 
-// Performans için Map yapıları kullanıldı
+// Veri yapıları - Hızlı erişim için Map kullanıldı
 const rooms = new Map();      // roomId -> Set(socket.id)
-const userSockets = new Map(); // userId -> socket.id (Hedefleme için kritik)
-const socketUsers = new Map(); // socket.id -> user data
+const userSockets = new Map(); // userId -> socket.id
+const socketUsers = new Map(); // socket.id -> userData
 
 console.log("🚀 StarVoice Ses Sunucusu başlatılıyor...");
 
 io.on("connection", (socket) => {
     console.log("🔌 Yeni bağlantı:", socket.id);
 
-    // --- Odaya Katılma ---
+    // 1. Odaya Katılma
     socket.on("join-room", (data) => {
         const { roomId, userId, username, avatar } = data;
 
         socket.join(`room_${roomId}`);
 
-        // Kullanıcı verilerini kaydet
+        // Kullanıcı verilerini Map'lere kaydet
         const userData = { userId, username, avatar, roomId, socketId: socket.id };
         socketUsers.set(socket.id, userData);
         userSockets.set(userId, socket.id);
@@ -42,14 +42,14 @@ io.on("connection", (socket) => {
 
         console.log(`✅ ${username} (ID: ${userId}) katıldı: room_${roomId}`);
 
-        // Diğer kullanıcılara yeni birinin geldiğini bildir
+        // Diğer kullanıcılara bildir
         socket.to(`room_${roomId}`).emit("user-joined", {
             userId,
             username,
             avatar
         });
 
-        // Odaya yeni giren kişiye odadaki diğer kullanıcıların listesini gönder
+        // Odaya giren kişiye mevcut kullanıcıları gönder
         const roomUsers = Array.from(rooms.get(roomId))
             .map(sid => socketUsers.get(sid))
             .filter(u => u);
@@ -57,9 +57,7 @@ io.on("connection", (socket) => {
         socket.emit("room-users", roomUsers);
     });
 
-    // --- WebRTC Noktadan Noktaya Sinyalleşme (EKLEME) ---
-    // Ses iletiminin başlaması için sinyaller doğrudan hedef kişiye gider.
-    
+    // 2. WebRTC Sinyalleşme (En Hızlı Yönlendirme)
     socket.on("offer", (data) => {
         const targetSid = userSockets.get(data.targetUserId);
         if (targetSid) {
@@ -90,44 +88,27 @@ io.on("connection", (socket) => {
         }
     });
 
-    // --- Koltuk ve Durum Yönetimi ---
+    // 3. Koltuk ve Durum Bildirimleri
     socket.on("seat-taken", (data) => {
-        const { roomId, seatNumber } = data;
-        socket.to(`room_${roomId}`).emit("seat-update-needed");
-        console.log(`💺 Koltuk ${seatNumber} alındı - Oda: ${roomId}`);
+        socket.to(`room_${data.roomId}`).emit("seat-update-needed");
     });
 
     socket.on("leave-seat", (data) => {
-        const { roomId, seatNumber } = data;
-        socket.to(`room_${roomId}`).emit("seat-update-needed");
-        console.log(`🚪 Koltuk ${seatNumber} boşaldı - Oda: ${roomId}`);
+        socket.to(`room_${data.roomId}`).emit("seat-update-needed");
     });
 
     socket.on("user-talking", (data) => {
-        const { roomId, seatNumber, isTalking, userId } = data;
-        socket.to(`room_${roomId}`).emit("user-talking", {
-            seatNumber,
-            isTalking,
-            userId
-        });
+        socket.to(`room_${data.roomId}`).emit("user-talking", data);
     });
 
-    // --- Mesajlaşma ---
+    // 4. Chat Mesajları
     socket.on("chat-message", (data) => {
-        const { roomId, userId, username, avatar, message } = data;
-        io.to(`room_${roomId}`).emit("chat-message", {
-            userId,
-            username,
-            avatar,
-            message,
-            timestamp: Date.now()
-        });
+        io.to(`room_${data.roomId}`).emit("chat-message", data);
     });
 
-    // --- Bağlantı Kesilmesi ---
+    // 5. Bağlantı Kesilmesi
     socket.on("disconnect", () => {
         const userData = socketUsers.get(socket.id);
-
         if (userData) {
             const { userId, username, roomId } = userData;
 
@@ -148,7 +129,7 @@ io.on("connection", (socket) => {
     socket.on("ping", () => { socket.emit("pong"); });
 });
 
-// --- Sunucu Arayüzü ve Health Check ---
+// Sunucu İzleme ve Health Check
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
@@ -163,16 +144,18 @@ app.get('/', (req, res) => {
         <!DOCTYPE html>
         <html>
         <head>
-            <title>StarVoice Sunucusu</title>
+            <title>StarVoice Ses Sunucusu</title>
             <style>
                 body { font-family: sans-serif; background: #1a1a2e; color: white; text-align: center; padding-top: 50px; }
-                .card { background: rgba(255,255,255,0.1); display: inline-block; padding: 20px; border-radius: 15px; }
+                .card { background: rgba(255, 255, 255, 0.1); border-radius: 15px; padding: 30px; display: inline-block; }
+                .status { color: #4ade80; font-weight: bold; }
             </style>
         </head>
         <body>
             <div class="card">
-                <h1>🎙️ StarVoice Ses Sunucusu</h1>
-                <p>Aktif Kullanıcı: ${socketUsers.size}</p>
+                <h1>🎙️ StarVoice Server</h1>
+                <p class="status">✅ Sunucu Aktif</p>
+                <p>Aktif Bağlantı: ${socketUsers.size}</p>
                 <p>Aktif Oda: ${rooms.size}</p>
             </div>
         </body>
@@ -182,264 +165,6 @@ app.get('/', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`
-╔═══════════════════════════════════════════════════════╗
-║  🎙️  SES SUNUCUSU BAŞARIYLA BAŞLATILDI               ║
-║  📡 Port: ${PORT.toString().padEnd(43)} ║
-║  ✅ Durum: Gecikmesiz WebRTC Aktif                    ║
-╚═══════════════════════════════════════════════════════╝
-    `);
+    console.log(`🚀 Sunucu port ${PORT} üzerinde hazır.`);
 });
-        if (!rooms.has(roomId)) {
-            rooms.set(roomId, new Set());
-        }
-        rooms.get(roomId).add(socket.id);
-
-        console.log(`✅ ${username} (ID: ${userId}) odaya katıldı: room_${roomId}`);
-        console.log(`📊 Oda ${roomId} - Aktif kullanıcı sayısı: ${rooms.get(roomId).size}`);
-
-        // Diğer kullanıcılara bildir
-        socket.to(`room_${roomId}`).emit("user-joined", {
-            userId,
-            username,
-            avatar
-        });
-
-        // Mevcut kullanıcılara hoşgeldin mesajı gönder
-        const roomUsers = Array.from(rooms.get(roomId))
-            .map(sid => socketUsers.get(sid))
-            .filter(u => u);
-
-        socket.emit("room-users", roomUsers);
-    });
-
-    // Koltuk alındı bildirimi
-    socket.on("seat-taken", (data) => {
-        const { roomId, seatNumber } = data;
-        socket.to(`room_${roomId}`).emit("seat-update-needed");
-        console.log(`💺 Koltuk ${seatNumber} alındı - Oda: ${roomId}`);
-    });
-
-    // Koltuktan ayrıldı bildirimi
-    socket.on("leave-seat", (data) => {
-        const { roomId, seatNumber } = data;
-        socket.to(`room_${roomId}`).emit("seat-update-needed");
-        console.log(`🚪 Koltuk ${seatNumber} boşaldı - Oda: ${roomId}`);
-    });
-
-    // Konuşma durumu
-    socket.on("user-talking", (data) => {
-        const { roomId, seatNumber, isTalking, userId } = data;
-        
-        socket.to(`room_${roomId}`).emit("user-talking", {
-            seatNumber,
-            isTalking,
-            userId
-        });
-
-        if (isTalking) {
-            console.log(`🎤 Kullanıcı konuşuyor - Koltuk: ${seatNumber}, Oda: ${roomId}`);
-        }
-    });
-
-    // Chat mesajı
-    socket.on("chat-message", (data) => {
-        const { roomId, userId, username, avatar, message } = data;
-
-        // Tüm odaya mesajı gönder (gönderen dahil)
-        io.to(`room_${roomId}`).emit("chat-message", {
-            userId,
-            username,
-            avatar,
-            message,
-            timestamp: Date.now()
-        });
-
-        console.log(`💬 [Oda ${roomId}] ${username}: ${message.substring(0, 50)}${message.length > 50 ? '...' : ''}`);
-    });
-
-    // WebRTC Sinyal İletimi
-    socket.on("offer", (offer) => {
-        const userData = socketUsers.get(socket.id);
-        if (userData) {
-            socket.to(`room_${userData.roomId}`).emit("offer", {
-                offer,
-                from: socket.id
-            });
-            console.log(`📞 WebRTC Offer gönderildi - ${userData.username}`);
-        }
-    });
-
-    socket.on("answer", (answer) => {
-        const userData = socketUsers.get(socket.id);
-        if (userData) {
-            socket.to(`room_${userData.roomId}`).emit("answer", {
-                answer,
-                from: socket.id
-            });
-            console.log(`📞 WebRTC Answer gönderildi - ${userData.username}`);
-        }
-    });
-
-    socket.on("ice-candidate", (candidate) => {
-        const userData = socketUsers.get(socket.id);
-        if (userData) {
-            socket.to(`room_${userData.roomId}`).emit("ice-candidate", {
-                candidate,
-                from: socket.id
-            });
-        }
-    });
-
-    // Bağlantı koptu
-    socket.on("disconnect", () => {
-        const userData = socketUsers.get(socket.id);
-
-        if (userData) {
-            const { userId, username, roomId } = userData;
-
-            // Odadan çıkar
-            if (rooms.has(roomId)) {
-                rooms.get(roomId).delete(socket.id);
-                
-                if (rooms.get(roomId).size === 0) {
-                    rooms.delete(roomId);
-                }
-            }
-
-            // Diğer kullanıcılara bildir
-            socket.to(`room_${roomId}`).emit("user-left", {
-                userId,
-                username
-            });
-
-            // Koltuğun boşaldığını bildir
-            socket.to(`room_${roomId}`).emit("seat-update-needed");
-
-            // Temizlik
-            socketUsers.delete(socket.id);
-            userSockets.delete(userId);
-
-            console.log(`❌ ${username} (ID: ${userId}) ayrıldı - Oda: ${roomId}`);
-            console.log(`📊 Oda ${roomId} - Kalan kullanıcı: ${rooms.has(roomId) ? rooms.get(roomId).size : 0}`);
-        } else {
-            console.log(`❌ Bilinmeyen socket ayrıldı: ${socket.id}`);
-        }
-    });
-
-    // Ping-Pong (bağlantı kontrolü)
-    socket.on("ping", () => {
-        socket.emit("pong");
-    });
-});
-
-// Sunucu istatistikleri
-setInterval(() => {
-    const totalUsers = socketUsers.size;
-    const totalRooms = rooms.size;
-    
-    console.log(`\n📊 === SUNUCU İSTATİSTİKLERİ ===`);
-    console.log(`👥 Toplam Aktif Kullanıcı: ${totalUsers}`);
-    console.log(`🏠 Aktif Oda Sayısı: ${totalRooms}`);
-    
-    if (totalRooms > 0) {
-        console.log(`\n🏠 Oda Detayları:`);
-        rooms.forEach((users, roomId) => {
-            console.log(`   Oda ${roomId}: ${users.size} kullanıcı`);
-        });
-    }
-    console.log(`================================\n`);
-}, 60000); // Her 1 dakikada bir
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.json({
-        status: 'ok',
-        uptime: process.uptime(),
-        activeConnections: socketUsers.size,
-        activeRooms: rooms.size,
-        timestamp: new Date().toISOString()
-    });
-});
-
-app.get('/', (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Ses Sunucusu</title>
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    max-width: 800px;
-                    margin: 50px auto;
-                    padding: 20px;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white;
-                }
-                .card {
-                    background: rgba(255, 255, 255, 0.1);
-                    backdrop-filter: blur(10px);
-                    border-radius: 15px;
-                    padding: 30px;
-                    margin: 20px 0;
-                }
-                h1 { margin: 0 0 10px 0; }
-                .status { color: #4ade80; font-weight: bold; }
-                .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-top: 20px; }
-                .stat-box {
-                    background: rgba(255, 255, 255, 0.05);
-                    padding: 20px;
-                    border-radius: 10px;
-                    text-align: center;
-                }
-                .stat-number { font-size: 48px; font-weight: bold; }
-                .stat-label { font-size: 14px; opacity: 0.8; }
-            </style>
-        </head>
-        <body>
-            <div class="card">
-                <h1>🎙️ Ses Sunucusu</h1>
-                <p class="status">✅ Sunucu Aktif ve Çalışıyor</p>
-                <div class="stats">
-                    <div class="stat-box">
-                        <div class="stat-number" id="users">${socketUsers.size}</div>
-                        <div class="stat-label">Aktif Kullanıcı</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-number" id="rooms">${rooms.size}</div>
-                        <div class="stat-label">Aktif Oda</div>
-                    </div>
-                </div>
-            </div>
-            <script>
-                setInterval(() => {
-                    fetch('/health')
-                        .then(r => r.json())
-                        .then(data => {
-                            document.getElementById('users').textContent = data.activeConnections;
-                            document.getElementById('rooms').textContent = data.activeRooms;
-                        });
-                }, 5000);
-            </script>
-        </body>
-        </html>
-    `);
-});
-
-const PORT = process.env.PORT || 3000;
-
-server.listen(PORT, () => {
-    console.log(`
-╔═══════════════════════════════════════════════════════╗
-║                                                       ║
-║  🎙️  SES SUNUCUSU BAŞARILI BİR ŞEKİLDE BAŞLATILDI   ║
-║                                                       ║
-║  📡 Port: ${PORT.toString().padEnd(43)} ║
-║  🌐 WebSocket: Aktif                                  ║
-║  🔒 CORS: Tüm originlere açık                         ║
-║  ✅ Durum: Hazır                                      ║
-║                                                       ║
-╚═══════════════════════════════════════════════════════╝
-    `);
-});
+      
