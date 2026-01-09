@@ -4,25 +4,27 @@ const socketIo = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
+
+// En düşük gecikme için WebSocket öncelikli ayarlar
 const io = socketIo(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"]
   },
-  transports: ['websocket', 'polling']
+  transports: ['websocket', 'polling'] 
 });
 
-// Oda ve kullanıcı yönetimi
-const rooms = new Map(); // roomId -> Set of socket objects
-const userSockets = new Map(); // userId -> socket.id
+// Performans için Map yapıları kullanıldı
+const rooms = new Map();      // roomId -> Set(socket.id)
+const userSockets = new Map(); // userId -> socket.id (Hedefleme için kritik)
 const socketUsers = new Map(); // socket.id -> user data
 
-console.log("🚀 Ses Sunucusu başlatılıyor...");
+console.log("🚀 StarVoice Ses Sunucusu başlatılıyor...");
 
 io.on("connection", (socket) => {
     console.log("🔌 Yeni bağlantı:", socket.id);
 
-    // Odaya katıl
+    // --- Odaya Katılma ---
     socket.on("join-room", (data) => {
         const { roomId, userId, username, avatar } = data;
 
@@ -33,7 +35,161 @@ io.on("connection", (socket) => {
         socketUsers.set(socket.id, userData);
         userSockets.set(userId, socket.id);
 
-        // Odayı oluştur veya güncelle
+        if (!rooms.has(roomId)) {
+            rooms.set(roomId, new Set());
+        }
+        rooms.get(roomId).add(socket.id);
+
+        console.log(`✅ ${username} (ID: ${userId}) katıldı: room_${roomId}`);
+
+        // Diğer kullanıcılara yeni birinin geldiğini bildir
+        socket.to(`room_${roomId}`).emit("user-joined", {
+            userId,
+            username,
+            avatar
+        });
+
+        // Odaya yeni giren kişiye odadaki diğer kullanıcıların listesini gönder
+        const roomUsers = Array.from(rooms.get(roomId))
+            .map(sid => socketUsers.get(sid))
+            .filter(u => u);
+
+        socket.emit("room-users", roomUsers);
+    });
+
+    // --- WebRTC Noktadan Noktaya Sinyalleşme (EKLEME) ---
+    // Ses iletiminin başlaması için sinyaller doğrudan hedef kişiye gider.
+    
+    socket.on("offer", (data) => {
+        const targetSid = userSockets.get(data.targetUserId);
+        if (targetSid) {
+            io.to(targetSid).emit("offer", {
+                offer: data.offer,
+                fromUserId: socketUsers.get(socket.id).userId
+            });
+        }
+    });
+
+    socket.on("answer", (data) => {
+        const targetSid = userSockets.get(data.targetUserId);
+        if (targetSid) {
+            io.to(targetSid).emit("answer", {
+                answer: data.answer,
+                fromUserId: socketUsers.get(socket.id).userId
+            });
+        }
+    });
+
+    socket.on("ice-candidate", (data) => {
+        const targetSid = userSockets.get(data.targetUserId);
+        if (targetSid) {
+            io.to(targetSid).emit("ice-candidate", {
+                candidate: data.candidate,
+                fromUserId: socketUsers.get(socket.id).userId
+            });
+        }
+    });
+
+    // --- Koltuk ve Durum Yönetimi ---
+    socket.on("seat-taken", (data) => {
+        const { roomId, seatNumber } = data;
+        socket.to(`room_${roomId}`).emit("seat-update-needed");
+        console.log(`💺 Koltuk ${seatNumber} alındı - Oda: ${roomId}`);
+    });
+
+    socket.on("leave-seat", (data) => {
+        const { roomId, seatNumber } = data;
+        socket.to(`room_${roomId}`).emit("seat-update-needed");
+        console.log(`🚪 Koltuk ${seatNumber} boşaldı - Oda: ${roomId}`);
+    });
+
+    socket.on("user-talking", (data) => {
+        const { roomId, seatNumber, isTalking, userId } = data;
+        socket.to(`room_${roomId}`).emit("user-talking", {
+            seatNumber,
+            isTalking,
+            userId
+        });
+    });
+
+    // --- Mesajlaşma ---
+    socket.on("chat-message", (data) => {
+        const { roomId, userId, username, avatar, message } = data;
+        io.to(`room_${roomId}`).emit("chat-message", {
+            userId,
+            username,
+            avatar,
+            message,
+            timestamp: Date.now()
+        });
+    });
+
+    // --- Bağlantı Kesilmesi ---
+    socket.on("disconnect", () => {
+        const userData = socketUsers.get(socket.id);
+
+        if (userData) {
+            const { userId, username, roomId } = userData;
+
+            if (rooms.has(roomId)) {
+                rooms.get(roomId).delete(socket.id);
+                if (rooms.get(roomId).size === 0) rooms.delete(roomId);
+            }
+
+            socket.to(`room_${roomId}`).emit("user-left", { userId, username });
+            socket.to(`room_${roomId}`).emit("seat-update-needed");
+
+            socketUsers.delete(socket.id);
+            userSockets.delete(userId);
+            console.log(`❌ ${username} ayrıldı.`);
+        }
+    });
+
+    socket.on("ping", () => { socket.emit("pong"); });
+});
+
+// --- Sunucu Arayüzü ve Health Check ---
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        uptime: process.uptime(),
+        activeConnections: socketUsers.size,
+        activeRooms: rooms.size
+    });
+});
+
+app.get('/', (req, res) => {
+    res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>StarVoice Sunucusu</title>
+            <style>
+                body { font-family: sans-serif; background: #1a1a2e; color: white; text-align: center; padding-top: 50px; }
+                .card { background: rgba(255,255,255,0.1); display: inline-block; padding: 20px; border-radius: 15px; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h1>🎙️ StarVoice Ses Sunucusu</h1>
+                <p>Aktif Kullanıcı: ${socketUsers.size}</p>
+                <p>Aktif Oda: ${rooms.size}</p>
+            </div>
+        </body>
+        </html>
+    `);
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`
+╔═══════════════════════════════════════════════════════╗
+║  🎙️  SES SUNUCUSU BAŞARIYLA BAŞLATILDI               ║
+║  📡 Port: ${PORT.toString().padEnd(43)} ║
+║  ✅ Durum: Gecikmesiz WebRTC Aktif                    ║
+╚═══════════════════════════════════════════════════════╝
+    `);
+});
         if (!rooms.has(roomId)) {
             rooms.set(roomId, new Set());
         }
